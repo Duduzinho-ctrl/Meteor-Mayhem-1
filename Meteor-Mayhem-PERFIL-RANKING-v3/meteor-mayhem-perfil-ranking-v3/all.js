@@ -1,0 +1,1365 @@
+
+// Compatibilidade para executar o jogo diretamente como arquivo .html (file://).
+// O jogo antigo usa window.storage; fora do ambiente que fornecia essa API, ela ficava undefined.
+// Este adaptador mantém a mesma interface usando localStorage, com fallback em memória.
+(function installStorageCompat(){
+  if (window.storage && typeof window.storage.get === 'function') return;
+  const memory = new Map();
+  const hasLocal = (() => {
+    try {
+      const k='__mm_storage_test__';
+      localStorage.setItem(k,'1');
+      localStorage.removeItem(k);
+      return true;
+    } catch (_) { return false; }
+  })();
+  const read = key => {
+    if (hasLocal) {
+      const value = localStorage.getItem(key);
+      return value === null ? null : { key, value };
+    }
+    return memory.has(key) ? { key, value: memory.get(key) } : null;
+  };
+  window.storage = {
+    async get(key){ return read(key); },
+    async set(key, value){
+      if (hasLocal) localStorage.setItem(key, String(value));
+      else memory.set(key, String(value));
+      return { key, value: String(value) };
+    },
+    async list(prefix=''){
+      const keys=[];
+      if (hasLocal) {
+        for(let i=0;i<localStorage.length;i++){
+          const k=localStorage.key(i);
+          if(k && k.startsWith(prefix)) keys.push(k);
+        }
+      } else {
+        for(const k of memory.keys()) if(k.startsWith(prefix)) keys.push(k);
+      }
+      return { keys };
+    },
+    async delete(key){
+      if (hasLocal) localStorage.removeItem(key);
+      else memory.delete(key);
+      return { key };
+    }
+  };
+})();
+(function(){
+  // ============ Storage keys ============
+  const ME_KEY = 'meteor-mayhem-player-v2';
+  const LB_PREFIX = 'mm-lb2:';   // uma chave POR JOGADOR (nunca sobrescreve os outros)
+  const NAME_PREFIX = 'mm-name2:'; // uma chave POR NOME (claim de nome único)
+  const DAILY_PREFIX = 'mm-daily2:'; // ranking do desafio diário: mm-daily2:AAAA-MM-DD:<id>
+  const LB_FETCH_CAP = 300; // limite de segurança ao listar o ranking
+
+  // ============ DOM refs ============
+  const stage = document.getElementById('stage');
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreLive = document.getElementById('scoreLive');
+  const musicTierDot = document.getElementById('musicTierDot');
+  const comboLive = document.getElementById('comboLive');
+  const comboBar = document.getElementById('comboBar');
+  const comboBarFill = document.getElementById('comboBarFill');
+  const bestChip = document.getElementById('bestChip');
+  const creditsChip = document.getElementById('creditsChip');
+  const hint = document.getElementById('hint');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const ariaLive = document.getElementById('ariaLive');
+  const muteBtn = document.getElementById('muteBtn');
+
+  const nameOverlay = document.getElementById('nameOverlay');
+  const nameInput = document.getElementById('nameInput');
+  const nameError = document.getElementById('nameError');
+  const startBtn = document.getElementById('startBtn');
+  const modeEndlessTab = document.getElementById('modeEndlessTab');
+  const modeLevelsTab = document.getElementById('modeLevelsTab');
+  const modeDailyTab = document.getElementById('modeDailyTab');
+
+  const levelPickOverlay = document.getElementById('levelPickOverlay');
+  const levelGrid = document.getElementById('levelGrid');
+  const closeLevelPickBtn = document.getElementById('closeLevelPickBtn');
+
+  const levelCompleteOverlay = document.getElementById('levelCompleteOverlay');
+  const levelCompleteTitle = document.getElementById('levelCompleteTitle');
+  const levelCompleteScore = document.getElementById('levelCompleteScore');
+  const levelCompleteCredits = document.getElementById('levelCompleteCredits');
+  const levelCompleteSkin = document.getElementById('levelCompleteSkin');
+  const nextLevelBtn = document.getElementById('nextLevelBtn');
+  const levelCompleteMenuBtn = document.getElementById('levelCompleteMenuBtn');
+
+  const deathOverlay = document.getElementById('deathOverlay');
+  const retryBtn = document.getElementById('retryBtn');
+  const shareBtn = document.getElementById('shareBtn');
+  const finalScore = document.getElementById('finalScore');
+  const rankTag = document.getElementById('rankTag');
+  const resultSub = document.getElementById('resultSub');
+  const earnedCreditsEl = document.getElementById('earnedCredits');
+  const missionToast = document.getElementById('missionToast');
+  const shopFromDeathBtn = document.getElementById('shopFromDeathBtn');
+  const menuFromDeathBtn = document.getElementById('menuFromDeathBtn');
+
+  const boardToggle = document.getElementById('boardToggle');
+  const boardTitle = document.getElementById('boardTitle');
+  const boardBody = document.getElementById('boardBody');
+
+  const shopToggleBtn = document.getElementById('shopToggleBtn');
+  const shopOverlay = document.getElementById('shopOverlay');
+  const shopCredits = document.getElementById('shopCredits');
+  const skinGrid = document.getElementById('skinGrid');
+  const closeShopBtn = document.getElementById('closeShopBtn');
+
+  const missionsToggleBtn = document.getElementById('missionsToggleBtn');
+  const missionsOverlay = document.getElementById('missionsOverlay');
+  const missionsList = document.getElementById('missionsList');
+  const closeMissionsBtn = document.getElementById('closeMissionsBtn');
+
+  const shieldPill = document.getElementById('shieldPill');
+  const shieldCountTxt = document.getElementById('shieldCountTxt');
+  const magnetPill = document.getElementById('magnetPill');
+  const magnetBarFill = document.getElementById('magnetBarFill');
+  const slowmoPill = document.getElementById('slowmoPill');
+  const slowmoBarFill = document.getElementById('slowmoBarFill');
+  const multiplierPill = document.getElementById('multiplierPill');
+  const multiplierBarFill = document.getElementById('multiplierBarFill');
+
+  const REDUCE_MOTION = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ============ Skins ============
+  const SKINS = [
+    { id:'default',   name:'Clássica',  price:0,   body:'#eef1f8', accent:'#2de2e6', flame:'#ff6a3d' },
+    { id:'ember',     name:'Brasa',     price:60,  body:'#ffcf9e', accent:'#ff6a3d', flame:'#ffd23f' },
+    { id:'ice',       name:'Gelo',      price:90,  body:'#bfe9ff', accent:'#7fd7ff', flame:'#e0f7ff' },
+    { id:'coral',     name:'Coral',     price:110, body:'#ff9d9d', accent:'#ff5c8a', flame:'#ffc9c9' },
+    { id:'lava',      name:'Lava',      price:120, body:'#ff8a5c', accent:'#ff4d2e', flame:'#ffdd57' },
+    { id:'arctic',    name:'Ártica',    price:150, body:'#e0f7ff', accent:'#a0e9ff', flame:'#ffffff' },
+    { id:'void',      name:'Vazio',     price:150, body:'#c9b6ff', accent:'#a06cff', flame:'#6c3ce9' },
+    { id:'magma',     name:'Magma',     price:170, body:'#ff5722', accent:'#bf360c', flame:'#ff9800' },
+    { id:'toxic',     name:'Tóxica',    price:190, body:'#c8ffb0', accent:'#7dff4d', flame:'#c8ff2e' },
+    { id:'shadow',    name:'Sombra',    price:210, body:'#9a9ac2', accent:'#5c5c7a', flame:'#8888aa' },
+    { id:'orchid',    name:'Orquídea',  price:220, body:'#e8b4ff', accent:'#da70d6', flame:'#f3d1ff' },
+    { id:'nebula',    name:'Nebulosa',  price:240, body:'#d68cff', accent:'#ff6ec7', flame:'#c15bff' },
+    { id:'mint',      name:'Menta',     price:250, body:'#b0fff0', accent:'#2de2c0', flame:'#d9fff5' },
+    { id:'emerald',   name:'Esmeralda', price:260, body:'#7cffcb', accent:'#22c55e', flame:'#bbf7d0' },
+    { id:'sapphire',  name:'Safira',    price:260, body:'#8ecbff', accent:'#3b82f6', flame:'#bfdbfe' },
+    { id:'amber',     name:'Âmbar',     price:280, body:'#ffc971', accent:'#ff9f1c', flame:'#ffe4ab' },
+    { id:'gold',      name:'Dourada',   price:300, body:'#ffe9a8', accent:'#ffd23f', flame:'#fff2b0' },
+    { id:'indigo',    name:'Índigo',    price:310, body:'#8087ff', accent:'#4a4de7', flame:'#c2c4ff' },
+    { id:'solar',     name:'Solar',     price:320, body:'#fff3b0', accent:'#ffcc00', flame:'#fff9c4' },
+    { id:'rose',      name:'Rosa',      price:340, body:'#ffb3d1', accent:'#ff4f9a', flame:'#ffe0ee' },
+    { id:'cyber',     name:'Cyber',     price:360, body:'#9dffb0', accent:'#39ff14', flame:'#c6ffb3' },
+    { id:'carbon',    name:'Carbono',   price:370, body:'#4a4a55', accent:'#8f8fa3', flame:'#ff3860' },
+    { id:'ghost',     name:'Fantasma',  price:380, body:'#eaf6ff', accent:'#a0d8ff', flame:'#d9f0ff' },
+    { id:'galactic',  name:'Galáctica', price:480, body:'#8b5cf6', accent:'#c084fc', flame:'#a855f7' },
+    { id:'prisma',    name:'Prisma',    price:550, body:'rainbow', accent:'rainbow', flame:'rainbow', rainbowSpeed:8 },
+    { id:'aurora',    name:'Aurora',    price:620, body:'rainbow', accent:'rainbow', flame:'rainbow', rainbowSpeed:5 },
+    { id:'supernova', name:'Supernova', price:750, body:'rainbow', accent:'rainbow', flame:'rainbow', rainbowSpeed:3 },
+    { id:'recruta',  name:'Recruta',   price:null, source:'level', requiredLevel:3,  body:'#9fd8ff', accent:'#4fc3f7', flame:'#bbdefb' },
+    { id:'veterano', name:'Veterano',  price:null, source:'level', requiredLevel:6,  body:'#ffb74d', accent:'#ff9800', flame:'#ffe0b2' },
+    { id:'lenda',    name:'Lenda',     price:null, source:'level', requiredLevel:8,  body:'rainbow', accent:'rainbow', flame:'rainbow', rainbowSpeed:2 },
+    { id:'ciclone',  name:'Ciclone',   price:null, source:'level', requiredLevel:12, body:'#7fffd4', accent:'#00e5ff', flame:'#40e0d0' },
+    { id:'imperador',name:'Imperador', price:null, source:'level', requiredLevel:16, body:'rainbow', accent:'rainbow', flame:'rainbow', rainbowSpeed:1.5 }
+  ];
+  function getSkin(id){ return SKINS.find(s=>s.id===id) || SKINS[0]; }
+
+  // ============ Níveis ============
+  const LEVELS = [
+    { target:120,  speed:300, diff:2,  mod:'normal',         modLabel:'Aquecimento',            reward:{credits:30} },
+    { target:260,  speed:330, diff:5,  mod:'doubleCoins',     modLabel:'Moedas em dobro',         reward:{credits:40} },
+    { target:420,  speed:355, diff:9,  mod:'normal',          modLabel:'Ritmo constante',         reward:{credits:50, skin:'recruta'} },
+    { target:600,  speed:380, diff:13, mod:'denseObstacles',  modLabel:'Obstáculos em excesso',   reward:{credits:60} },
+    { target:820,  speed:405, diff:17, mod:'normal',          modLabel:'Sem trégua',              reward:{credits:70} },
+    { target:1080, speed:430, diff:21, mod:'gateRush',        modLabel:'Chuva de portais',        reward:{credits:90, skin:'veterano'} },
+    { target:1380, speed:455, diff:25, mod:'floatStorm',      modLabel:'Tempestade de asteroides',reward:{credits:110} },
+    { target:1750, speed:480, diff:30, mod:'normal',          modLabel:'Prova de fogo',           reward:{credits:150, skin:'lenda'} },
+    { target:2150, speed:400, diff:20, mod:'noPowerups',      modLabel:'Sem power-ups',           reward:{credits:130} },
+    { target:2600, speed:500, diff:34, mod:'nightMode',       modLabel:'Modo noturno',            reward:{credits:160} },
+    { target:3100, speed:510, diff:36, mod:'doubleCoins',     modLabel:'Corrida do ouro',         reward:{credits:170} },
+    { target:3650, speed:520, diff:38, mod:'denseObstacles',  modLabel:'Campo minado',            reward:{credits:200, skin:'ciclone'} },
+    { target:4250, speed:530, diff:40, mod:'gateRush',        modLabel:'Labirinto de portais',    reward:{credits:210} },
+    { target:4900, speed:540, diff:42, mod:'floatStorm',      modLabel:'Caos orbital',            reward:{credits:220} },
+    { target:5600, speed:550, diff:44, mod:'noPowerups',      modLabel:'Só você e a nave',         reward:{credits:240} },
+    { target:6400, speed:560, diff:46, mod:'nightMode',       modLabel:'A prova final',           reward:{credits:300, skin:'imperador'} }
+  ];
+
+  // ============ Missões ============
+  const MISSION_POOL = [
+    { type:'coins',    target:12, reward:35, label:t=>`Colete ${t} moedas numa corrida` },
+    { type:'coins',    target:22, reward:55, label:t=>`Colete ${t} moedas numa corrida` },
+    { type:'combo',    target:4,  reward:45, label:t=>`Alcance combo x${t} numa corrida` },
+    { type:'combo',    target:6,  reward:70, label:t=>`Alcance combo x${t} numa corrida` },
+    { type:'score',    target:250,reward:55, label:t=>`Marque ${t} pontos numa corrida` },
+    { type:'score',    target:600,reward:90, label:t=>`Marque ${t} pontos numa corrida` },
+    { type:'survive',  target:35, reward:60, label:t=>`Sobreviva ${t}s numa corrida` },
+    { type:'powerup',  target:2,  reward:45, label:t=>`Use ${t} power-ups numa corrida` }
+  ];
+  function pickMissions(){
+    const pool = [...MISSION_POOL];
+    const chosen = [];
+    for(let i=0;i<3 && pool.length;i++){
+      const idx = Math.floor(Math.random()*pool.length);
+      const m = pool.splice(idx,1)[0];
+      chosen.push({ type:m.type, target:m.target, reward:m.reward, progress:0, done:false });
+    }
+    return chosen;
+  }
+
+  // ============ Jogador (persistência pessoal) ============
+  let player = {
+    id: null, name: null, best: 0, bestDaily: 0, credits: 0,
+    skins: ['default'], equipped: 'default',
+    muted: false, levelProgress: 0, missions: null
+  };
+
+  async function loadPlayer(){
+    try{
+      const r = await window.storage.get(ME_KEY, false);
+      if(r && r.value){
+        const d = JSON.parse(r.value);
+        player = {
+          id: d.id, name: d.name, best: d.best || 0, bestDaily: d.bestDaily || 0,
+          credits: d.credits || 0,
+          skins: (Array.isArray(d.skins) && d.skins.length) ? d.skins : ['default'],
+          equipped: d.equipped || 'default',
+          muted: !!d.muted,
+          levelProgress: d.levelProgress || 0,
+          missions: (Array.isArray(d.missions) && d.missions.length) ? d.missions : null
+        };
+      }
+    }catch(e){ /* jogador novo, sem save ainda */ }
+    if(!player.missions) player.missions = pickMissions();
+  }
+  async function savePlayer(){
+    try{ await window.storage.set(ME_KEY, JSON.stringify(player), false); }
+    catch(e){ console.error('falha ao salvar jogador', e); }
+  }
+
+  // ============ Ranking (uma chave por jogador — sem corrida de concorrência) ============
+  // margem generosa (cobre até o pior caso teórico: combo máximo + todos os multiplicadores ativos o tempo todo);
+  // não é segurança de verdade (isso exigiria validar no servidor, que este ambiente não permite hospedar),
+  // mas barra o caso mais óbvio de alguém injetar uma pontuação absurda direto pelo console.
+  function maxPlausibleScore(elapsedSeconds){
+    return 250 + Math.max(0, elapsedSeconds) * 300;
+  }
+
+  async function submitScore(score, prefix, elapsedSeconds){
+    prefix = prefix || LB_PREFIX;
+    if(typeof elapsedSeconds === 'number'){
+      const cap = maxPlausibleScore(elapsedSeconds);
+      if(score > cap){
+        console.warn('Pontuação recusada por implausibilidade:', score, 'em', elapsedSeconds.toFixed(1)+'s (limite '+Math.round(cap)+')');
+        return;
+      }
+    }
+    const key = prefix + player.id;
+    try{
+      const existing = await window.storage.get(key, true);
+      if(existing && existing.value){
+        const d = JSON.parse(existing.value);
+        if(score <= d.score) return; // nunca regride o recorde do jogador
+      }
+    }catch(e){ /* ainda não tem entrada, segue pra criar */ }
+    try{
+      await window.storage.set(key, JSON.stringify({ name: player.name, score }), true);
+    }catch(e){ console.error('falha ao salvar pontuação no ranking', e); }
+  }
+
+  async function loadLeaderboardTop(limit, prefix){
+    prefix = prefix || LB_PREFIX;
+    let keys = [];
+    try{
+      const r = await window.storage.list(prefix, true);
+      keys = (r && r.keys) ? r.keys.slice(0, LB_FETCH_CAP) : [];
+    }catch(e){ return []; }
+    const entries = [];
+    for(const k of keys){
+      try{
+        const r = await window.storage.get(k, true);
+        if(r && r.value){
+          const d = JSON.parse(r.value);
+          entries.push({ id: k.slice(prefix.length), name: d.name, score: d.score });
+        }
+      }catch(e){ /* ignora chave com problema */ }
+    }
+    entries.sort((a,b)=>b.score-a.score);
+    return entries.slice(0, limit);
+  }
+  async function getMyRank(prefix){
+    const all = await loadLeaderboardTop(LB_FETCH_CAP, prefix);
+    const idx = all.findIndex(e=>e.id===player.id);
+    return { rank: idx>=0 ? idx+1 : null, top: all.slice(0,10) };
+  }
+
+  function uuid(){ return 'p-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10); }
+  function escapeHtml(s){
+    return (s||'?').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  async function renderBoard(list, highlightId, prefix){
+    if(!list) list = await loadLeaderboardTop(10, prefix);
+    boardBody.innerHTML = '';
+    if(!list || list.length === 0){
+      boardBody.innerHTML = '<div class="board-empty">Ninguém pontuou ainda. Seja o primeiro do mundo!</div>';
+      return;
+    }
+    list.slice(0,10).forEach((e,i)=>{
+      const row = document.createElement('div');
+      row.className = 'board-row' + (i===0?' top1':i===1?' top2':i===2?' top3':'') + (e.id===highlightId?' me':'');
+      const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1);
+      row.innerHTML = `<div class="rank">${medal}</div><div class="name">${escapeHtml(e.name)}</div><div class="pts">${e.score}</div>`;
+      boardBody.appendChild(row);
+    });
+  }
+  boardToggle.addEventListener('click', async ()=>{
+    const open = boardBody.classList.toggle('open');
+    boardToggle.classList.toggle('open', open);
+    if(open){
+      if(mode === 'daily'){
+        boardTitle.textContent = '🔥 Ranking de hoje';
+        boardBody.innerHTML = '<div class="board-loading">carregando ranking de hoje...</div>';
+        await renderBoard(null, player.id, DAILY_PREFIX + todayKey() + ':');
+      } else {
+        boardTitle.textContent = '🏆 Ranking mundial';
+        boardBody.innerHTML = '<div class="board-loading">carregando ranking...</div>';
+        await renderBoard(null, player.id, LB_PREFIX);
+      }
+    }
+  });
+
+  // ============ Nome único (uma chave por nome — não trava se dois jogadores clicarem junto) ============
+  async function claimName(name, playerId){
+    const key = NAME_PREFIX + name.trim().toLowerCase();
+    try{
+      const existing = await window.storage.get(key, true);
+      if(existing && existing.value){
+        const d = JSON.parse(existing.value);
+        if(d.ownerId === playerId) return { ok:true }; // já é o dono, pode continuar usando
+        return { ok:false };
+      }
+    }catch(e){ /* nome livre, segue pra reivindicar */ }
+    try{
+      await window.storage.set(key, JSON.stringify({ ownerId: playerId, display: name.trim() }), true);
+    }catch(e){ console.error('falha ao reivindicar nome', e); }
+    return { ok:true };
+  }
+
+  // ============ Som (sintetizado via Web Audio, sem arquivos externos) ============
+  let audioCtx = null;
+  function ensureAudio(){
+    if(audioCtx) return;
+    try{ audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch(e){ audioCtx = null; }
+  }
+  function tone(freq, dur, type, peak, delay){
+    if(!audioCtx || player.muted) return;
+    const t0 = audioCtx.currentTime + (delay||0);
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freq, t0);
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(peak||0.18, t0+0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(t0); osc.stop(t0+dur+0.02);
+  }
+  const sfx = {
+    jump(){ tone(520,0.12,'square',0.12); tone(720,0.08,'square',0.08,0.03); },
+    coin(){ tone(880,0.09,'sine',0.16); tone(1180,0.08,'sine',0.12,0.05); },
+    combo(level){ tone(600+level*70, 0.14,'triangle',0.16); },
+    powerup(){ tone(440,0.1,'sawtooth',0.14); tone(660,0.1,'sawtooth',0.14,0.08); tone(880,0.14,'sawtooth',0.16,0.16); },
+    shield(){ tone(300,0.16,'square',0.16); },
+    hit(){ tone(140,0.25,'sawtooth',0.22); tone(90,0.3,'square',0.18,0.05); },
+    click(){ tone(500,0.05,'square',0.08); },
+    levelUp(){ tone(523,0.12,'sine',0.16); tone(659,0.12,'sine',0.16,0.1); tone(784,0.2,'sine',0.18,0.2); },
+    missionDone(){ tone(700,0.1,'sine',0.15); tone(1000,0.14,'sine',0.15,0.09); }
+  };
+  function updateMuteBtn(){ muteBtn.textContent = player.muted ? '🔇' : '🔊'; }
+  muteBtn.addEventListener('click', async ()=>{
+    ensureAudio();
+    player.muted = !player.muted;
+    updateMuteBtn();
+    await savePlayer();
+    if(player.muted){ stopMusic(); }
+    else { sfx.click(); if(running && !paused && deathPhase==='none') startMusic(); }
+  });
+
+  // ---------- Música de fundo (sequenciador simples, estilo arcade/EDM) ----------
+  // 3 fases de intensidade, sincronizadas com o tempo da corrida atual (mesma variável que rege a dificuldade):
+  // 🟢 0-20s normal · 🟡 20-40s bateria mais rápida e mais densa · 🔴 40s+ insana (tempo mais rápido + lead agudo)
+  const MUSIC_ROOT = 110;
+  const MUSIC_BASS = [0,0,7,0, 0,0,5,7, 0,0,7,0, 0,5,7,10];
+  let musicPlaying = false, musicStep = 0, musicNextNoteTime = 0, musicSchedulerId = null;
+  function noteFreq(semi){ return MUSIC_ROOT * Math.pow(2, semi/12); }
+  function musicTierFor(t){ if(t < 20) return 1; if(t < 40) return 2; return 3; }
+  function musicBpmForTier(tier){ return tier===1 ? 150 : tier===2 ? 168 : 192; }
+
+  function scheduleMusicStep(time, step, tier, stepDur){
+    const semis = MUSIC_BASS[step % MUSIC_BASS.length];
+
+    // baixo: sempre presente; fica mais "sujo" (saw) na fase insana
+    const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+    osc.type = tier>=3 ? 'sawtooth' : 'square';
+    osc.frequency.setValueAtTime(noteFreq(semis), time);
+    gain.gain.setValueAtTime(0.0001, time);
+    gain.gain.exponentialRampToValueAtTime(tier>=3 ? 0.065 : 0.05, time+0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time+stepDur*0.9);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(time); osc.stop(time+stepDur);
+
+    // chimbal: só nos passos ímpares na fase normal; todo passo a partir da fase 2 (bateria mais rápida)
+    const hihatOn = tier>=2 ? true : (step % 2 === 1);
+    if(hihatOn){
+      const o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain();
+      o2.type = 'square'; o2.frequency.setValueAtTime(noteFreq(semis+12), time);
+      g2.gain.setValueAtTime(0.0001, time);
+      g2.gain.exponentialRampToValueAtTime(0.025, time+0.005);
+      g2.gain.exponentialRampToValueAtTime(0.0001, time+stepDur*0.5);
+      o2.connect(g2); g2.connect(audioCtx.destination);
+      o2.start(time); o2.stop(time+stepDur*0.5);
+    }
+
+    // bumbo extra: reforça o groove a partir da fase 2, mais frequente na fase insana
+    if(tier>=2){
+      const kickEvery = tier>=3 ? 2 : 4;
+      if(step % kickEvery === 0){
+        const ko = audioCtx.createOscillator(), kg = audioCtx.createGain();
+        ko.type = 'sine';
+        ko.frequency.setValueAtTime(95, time);
+        ko.frequency.exponentialRampToValueAtTime(40, time+0.12);
+        kg.gain.setValueAtTime(0.22, time);
+        kg.gain.exponentialRampToValueAtTime(0.0001, time+0.14);
+        ko.connect(kg); kg.connect(audioCtx.destination);
+        ko.start(time); ko.stop(time+0.15);
+      }
+    }
+
+    // fase insana: arpejo agudo por cima, dá a sensação de urgência
+    if(tier>=3){
+      const lo = audioCtx.createOscillator(), lg = audioCtx.createGain();
+      lo.type = 'sawtooth';
+      lo.frequency.setValueAtTime(noteFreq(semis+24+(step%3===0?7:0)), time);
+      lg.gain.setValueAtTime(0.0001, time);
+      lg.gain.exponentialRampToValueAtTime(0.035, time+0.008);
+      lg.gain.exponentialRampToValueAtTime(0.0001, time+stepDur*0.6);
+      lo.connect(lg); lg.connect(audioCtx.destination);
+      lo.start(time); lo.stop(time+stepDur*0.6);
+    }
+  }
+  function musicScheduler(){
+    if(!audioCtx) return;
+    const tier = musicTierFor(elapsed);
+    const stepDur = 60 / musicBpmForTier(tier) / 2;
+    while(musicNextNoteTime < audioCtx.currentTime + 0.15){
+      scheduleMusicStep(musicNextNoteTime, musicStep, tier, stepDur);
+      musicNextNoteTime += stepDur;
+      musicStep++;
+    }
+  }
+  function startMusic(){
+    ensureAudio();
+    if(!audioCtx || musicPlaying || player.muted) return;
+    musicPlaying = true; musicStep = 0;
+    musicNextNoteTime = audioCtx.currentTime + 0.05;
+    musicSchedulerId = setInterval(musicScheduler, 50);
+  }
+  function stopMusic(){
+    musicPlaying = false;
+    if(musicSchedulerId){ clearInterval(musicSchedulerId); musicSchedulerId = null; }
+  }
+
+
+  // ============ Estado geral do jogo ============
+  let mode = 'endless';       // 'endless' | 'levels'
+  let currentLevel = 0;       // índice em LEVELS
+  let running = false;
+  let paused = false;
+  let animId = null;
+  let lastTime = 0;
+  let groundY;
+  let W = 900, H = 383;
+
+  let speed = 340, baseSpeed = 340;
+  const MAX_SPEED = 560; // teto de velocidade: evita ficar rápido demais e injogável
+  let elapsed = 0;
+  let effectiveDifficulty = 0; // usado nas fórmulas de spawn (elapsed no sem-fim, fixo no modo níveis)
+  let distanceScore = 0, coinScore = 0;
+  let combo = 1, comboTimer = 0, comboTimerMax = 2.2, maxComboThisRun = 1, lastTierCombo = 1;
+  let pulseRings = [];
+  function comboTierColor(c){
+    if(c>=8) return '#ff2fd0';
+    if(c>=6) return '#ffd23f';
+    if(c>=4) return '#7dff9e';
+    return '#2de2e6';
+  }
+  let coinsCollected = 0, powerupsUsedThisRun = 0;
+  let shake = 0;
+  let flashColor = '#ffffff', flashAlpha = 0;
+
+  let shieldCount = 0, magnetTimer = 0, slowmoTimer = 0;
+  const MAGNET_DUR = 6, SLOWMO_DUR = 5, MULTIPLIER_DUR = 6;
+  let scoreMultiplierTimer = 0;
+
+  let deathPhase = 'none'; // 'none' | 'freeze' | 'slowmo' | 'done'
+  let deathTimer = 0;
+  let shockwave = null;
+
+  let ship = { x: 90, y: 0, vy: 0, w: 34, h: 22, jumps: 0, maxJumps: 2 };
+  const GRAVITY = 2000;
+  const JUMP_V = -680;
+
+  let obstacles = [], coins = [], powerups = [], particles = [], fragments = [], starsBg = [];
+  let spawnTimer = 0, coinSpawnTimer = 0, powerupSpawnTimer = 0;
+
+  function resizeCanvas(){
+    const rect = stage.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    W = rect.width; H = rect.height;
+  }
+  window.addEventListener('resize', resizeCanvas);
+  window.addEventListener('orientationchange', resizeCanvas);
+
+  function initStars(){
+    starsBg = [];
+    for(let i=0;i<40;i++){
+      starsBg.push({ x: Math.random()*W, y: Math.random()*H*0.7, r: Math.random()*1.6+0.4, s: Math.random()*40+20 });
+    }
+  }
+
+  function todayKey(){ return new Date().toISOString().slice(0,10); }
+  function seedFromString(s){ let h=0; for(let i=0;i<s.length;i++){ h = (Math.imul(31,h)+s.charCodeAt(i))|0; } return h; }
+  function mulberry32(seed){
+    return function(){
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  let rng = Math.random; // usado nos spawns de obstáculo/moeda/power-up; vira seed fixa no Desafio Diário
+
+  let coinMultiplier = 1, spawnRateMultiplier = 1, gateBias = 0, floaterBias = 0, powerupsDisabled = false, nightMode = false;
+  function applyLevelModifier(mod){
+    coinMultiplier = 1; spawnRateMultiplier = 1; gateBias = 0; floaterBias = 0; powerupsDisabled = false; nightMode = false;
+    if(mod === 'doubleCoins') coinMultiplier = 2;
+    else if(mod === 'denseObstacles') spawnRateMultiplier = 1.5;
+    else if(mod === 'gateRush') gateBias = 0.22;
+    else if(mod === 'floatStorm') floaterBias = 0.22;
+    else if(mod === 'noPowerups') powerupsDisabled = true;
+    else if(mod === 'nightMode') nightMode = true;
+  }
+
+  function resetGame(){
+    groundY = H*0.78;
+    ship.y = groundY; ship.vy = 0; ship.jumps = 0;
+    speed = mode === 'levels' ? LEVELS[currentLevel].speed : baseSpeed;
+    elapsed = 0; effectiveDifficulty = mode === 'levels' ? LEVELS[currentLevel].diff : 0;
+    applyLevelModifier(mode === 'levels' ? LEVELS[currentLevel].mod : 'normal');
+    rng = mode === 'daily' ? mulberry32(seedFromString('mm-daily-'+todayKey())) : Math.random;
+    distanceScore = 0; coinScore = 0;
+    combo = 1; comboTimer = 0; maxComboThisRun = 1; lastTierCombo = 1;
+    pulseRings = [];
+    coinsCollected = 0; powerupsUsedThisRun = 0;
+    shieldCount = 0; magnetTimer = 0; slowmoTimer = 0; scoreMultiplierTimer = 0;
+    obstacles = []; coins = []; powerups = []; particles = []; fragments = [];
+    shockwave = null; shake = 0; flashAlpha = 0;
+    deathPhase = 'none'; deathTimer = 0;
+    spawnTimer = 0.6; coinSpawnTimer = 1.2; powerupSpawnTimer = powerupsDisabled ? Infinity : (13 + Math.random()*6);
+    initStars();
+  }
+
+  function currentScore(){ return Math.floor(distanceScore) + coinScore; }
+
+  function screenFlash(color, alpha){
+    flashColor = color; flashAlpha = REDUCE_MOTION ? Math.min(alpha,0.2) : alpha;
+  }
+
+  function doJump(){
+    if(!running || paused || deathPhase !== 'none') return;
+    if(ship.jumps < ship.maxJumps){
+      ship.vy = JUMP_V;
+      ship.jumps++;
+      sfx.jump();
+      spawnBurst(ship.x, ship.y, '#2de2e6', 6);
+    }
+  }
+
+  function spawnBurst(x,y,color,n){
+    for(let i=0;i<n;i++){
+      particles.push({
+        x, y, vx:(Math.random()-0.5)*260, vy:(Math.random()-0.9)*260,
+        life: 0.5+Math.random()*0.3, maxLife: 0.5+Math.random()*0.3, color
+      });
+    }
+  }
+
+  function spawnGroundSpike(){
+    const tall = rng() < Math.min(0.2 + effectiveDifficulty*0.015, 0.55);
+    const h = tall ? 115 + rng()*40 : 28 + rng()*14;
+    obstacles.push({ type:'ground', x: W+20, y: groundY - h + 10, w: 22, h, tall });
+    const clusterChance = Math.min(0.06 + effectiveDifficulty*0.006, 0.35);
+    if(rng() < clusterChance){
+      const h2 = 26 + rng()*12;
+      obstacles.push({ type:'ground', x: W+20+70+rng()*30, y: groundY - h2 + 10, w: 20, h: h2, tall:false });
+    }
+  }
+  function spawnFloater(){
+    const amp = 50 + rng()*28;
+    const baseY = groundY - 95 - rng()*15;
+    obstacles.push({ type:'floater', x: W+20, w:26, h:26, baseY, amp, freq: 1.7+rng()*0.8, phase: rng()*6.28, spawnTime: elapsed, y: baseY-13 });
+  }
+  function spawnGate(){
+    const gapSize = 70;
+    const gapCenter = groundY - (45 + rng()*55);
+    const gapTop = gapCenter - gapSize/2, gapBottom = gapCenter + gapSize/2;
+    const w = 24;
+    obstacles.push({ type:'gateTop', x: W+20, y: 0, w, h: Math.max(10, gapTop) });
+    obstacles.push({ type:'gateBottom', x: W+20, y: gapBottom, w, h: Math.max(10, (groundY+10)-gapBottom) });
+  }
+  // obstáculo rápido: viaja mais rápido que o resto da tela, exige reação ágil
+  function spawnSwooper(){
+    const h = 30;
+    obstacles.push({ type:'swooper', x: W+20, y: groundY - h + 10, w: 20, h, speedMult: 1.6 });
+  }
+  function spawnObstacle(){
+    const canGate = effectiveDifficulty > 16;
+    const canFloater = effectiveDifficulty > 7;
+    const canSwooper = effectiveDifficulty > 12;
+    const roll = rng();
+    const gateChance = (canGate ? 0.14 : 0) + gateBias;
+    const swooperChance = canSwooper ? 0.12 : 0;
+    const floaterChance = (canFloater ? 0.22 : 0) + floaterBias;
+    if(canGate && roll < gateChance){ spawnGate(); return; }
+    if(canSwooper && roll < gateChance+swooperChance){ spawnSwooper(); return; }
+    if(roll < gateChance+swooperChance+floaterChance && (canFloater || floaterBias>0)){ spawnFloater(); return; }
+    spawnGroundSpike();
+  }
+  function spawnCoin(){
+    const y = groundY - 40 - rng()*90;
+    coins.push({ x: W+20, y, r: 9, collected:false });
+  }
+  const POWERUP_TYPES = [
+    { type:'shield', color:'#4fd6ff', icon:'🛡️' },
+    { type:'magnet', color:'#c084fc', icon:'🧲' },
+    { type:'slowmo', color:'#60a5fa', icon:'⏱' },
+    { type:'multiplier', color:'#ffd23f', icon:'✨' }
+  ];
+  function spawnPowerup(){
+    const def = POWERUP_TYPES[Math.floor(rng()*POWERUP_TYPES.length)];
+    const y = groundY - 50 - rng()*70;
+    powerups.push({ type:def.type, color:def.color, x: W+20, y, r:13, collected:false });
+  }
+
+  // ============ Missões: progresso avaliado ao final da corrida ============
+  function evaluateMissionsAfterRun(){
+    if(!player.missions) player.missions = pickMissions();
+    const stats = {
+      coins: coinsCollected,
+      combo: maxComboThisRun,
+      score: currentScore(),
+      survive: Math.floor(elapsed),
+      powerup: powerupsUsedThisRun
+    };
+    let totalReward = 0;
+    const completedNow = [];
+    player.missions.forEach(m=>{
+      if(m.done) return;
+      const val = stats[m.type] || 0;
+      m.progress = Math.max(m.progress, val);
+      if(m.progress >= m.target){
+        m.done = true;
+        totalReward += m.reward;
+        completedNow.push(m);
+      }
+    });
+    if(player.missions.every(m=>m.done)){
+      player.missions = pickMissions();
+    }
+    if(totalReward > 0) sfx.missionDone();
+    return { totalReward, completedNow };
+  }
+
+  function renderMissions(){
+    if(!player.missions) player.missions = pickMissions();
+    missionsList.innerHTML = '';
+    player.missions.forEach(m=>{
+      const def = MISSION_POOL.find(p=>p.type===m.type && p.target===m.target);
+      const label = def ? def.label(m.target) : `${m.type} ${m.target}`;
+      const pct = Math.min(100, Math.round((m.progress/m.target)*100));
+      const card = document.createElement('div');
+      card.className = 'mission-card' + (m.done ? ' done' : '');
+      card.innerHTML = `
+        <div class="mission-title">${label}</div>
+        <div class="mission-progress-bar"><div class="mission-progress-fill" style="width:${pct}%"></div></div>
+        <div class="mission-reward">${m.done ? 'Concluída ✅' : ('Recompensa: '+m.reward+' moedas')}</div>
+      `;
+      missionsList.appendChild(card);
+    });
+  }
+  missionsToggleBtn.addEventListener('click', ()=>{
+    sfx.click();
+    if(running) setPaused(true);
+    if(!deathOverlay.classList.contains('hidden')){ deathOverlay.classList.add('hidden'); overlayToRestore = deathOverlay; }
+    renderMissions();
+    missionsOverlay.classList.remove('hidden');
+  });
+  closeMissionsBtn.addEventListener('click', ()=>{
+    sfx.click();
+    missionsOverlay.classList.add('hidden');
+    if(overlayToRestore){ overlayToRestore.classList.remove('hidden'); overlayToRestore = null; }
+    if(paused){ setPaused(false); }
+  });
+
+  function update(dt){
+    elapsed += dt;
+    if(mode === 'endless'){
+      effectiveDifficulty = elapsed;
+      speed = Math.min(MAX_SPEED, baseSpeed + elapsed*12);
+    }
+    const moveSpeed = speed * (slowmoTimer > 0 ? 0.6 : 1);
+    distanceScore += dt * speed * 0.045 * (scoreMultiplierTimer > 0 ? 2 : 1);
+
+    comboTimer -= dt;
+    if(comboTimer <= 0 && combo > 1){ combo = 1; lastTierCombo = 1; }
+
+    if(magnetTimer > 0) magnetTimer = Math.max(0, magnetTimer - dt);
+    if(slowmoTimer > 0) slowmoTimer = Math.max(0, slowmoTimer - dt);
+    if(scoreMultiplierTimer > 0) scoreMultiplierTimer = Math.max(0, scoreMultiplierTimer - dt);
+    if(flashAlpha > 0) flashAlpha = Math.max(0, flashAlpha - dt*2.6);
+
+    // física da nave
+    ship.vy += GRAVITY*dt;
+    ship.y += ship.vy*dt;
+    if(ship.y >= groundY){ ship.y = groundY; ship.vy = 0; ship.jumps = 0; }
+
+    // spawns
+    spawnTimer -= dt;
+    if(spawnTimer <= 0){
+      spawnObstacle();
+      const gap = (Math.max(0.46, 1.25 - effectiveDifficulty*0.016) + Math.random()*0.3) / spawnRateMultiplier;
+      spawnTimer = gap;
+    }
+    coinSpawnTimer -= dt;
+    if(coinSpawnTimer <= 0){ spawnCoin(); coinSpawnTimer = 1.1 + Math.random()*1.4; }
+    powerupSpawnTimer -= dt;
+    if(!powerupsDisabled && powerupSpawnTimer <= 0){ spawnPowerup(); powerupSpawnTimer = 14 + Math.random()*8; }
+
+    // move obstáculos
+    for(const o of obstacles){
+      o.x -= moveSpeed*(o.speedMult||1)*dt;
+      if(o.type === 'floater'){ o.y = (o.baseY + Math.sin((elapsed-o.spawnTime)*o.freq + o.phase)*o.amp) - o.h/2; }
+    }
+    obstacles = obstacles.filter(o => o.x + o.w > -10);
+
+    // move moedas (com ímã, se ativo)
+    for(const c of coins){
+      c.x -= moveSpeed*dt;
+      if(magnetTimer > 0){
+        const dx = ship.x - c.x, dy = (ship.y-ship.h/2) - c.y;
+        const dist = Math.sqrt(dx*dx+dy*dy);
+        if(dist < 170){ c.x += dx*Math.min(1, dt*4); c.y += dy*Math.min(1, dt*4); }
+      }
+    }
+    coins = coins.filter(c => c.x > -20 && !c.collected);
+
+    // move power-ups
+    for(const p of powerups){ p.x -= moveSpeed*dt; }
+    powerups = powerups.filter(p => p.x > -20 && !p.collected);
+
+    // partículas
+    for(const p of particles){ p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 600*dt; p.life -= dt; }
+    particles = particles.filter(p => p.life > 0);
+
+    // estrelas de fundo
+    for(const s of starsBg){
+      s.x -= s.s*dt;
+      if(s.x < -5){ s.x = W+5; s.y = Math.random()*H*0.7; }
+    }
+
+    // colisão nave x obstáculo (hitbox mais generosa que o desenho, pra ficar justo)
+    const hbW = ship.w*0.6, hbH = ship.h*0.68;
+    const sx = ship.x - hbW/2, sy = ship.y - ship.h/2 - hbH/2, sw = hbW, sh = hbH;
+    for(let i=obstacles.length-1;i>=0;i--){
+      const o = obstacles[i];
+      const ow = o.w*0.88, oh = o.h*0.9, ox = o.x + (o.w-ow)/2, oy = o.y + (o.h-oh)/2;
+      if(sx < ox+ow && sx+sw > ox && sy < oy+oh && sy+sh > oy){
+        if(shieldCount > 0){
+          shieldCount--;
+          sfx.shield();
+          screenFlash('#4fd6ff', 0.35);
+          spawnBurst(ship.x, ship.y-ship.h/2, '#4fd6ff', 14);
+          obstacles.splice(i,1);
+        } else {
+          triggerCrash();
+          return;
+        }
+      }
+    }
+    // colisão nave x moeda
+    for(const c of coins){
+      if(!c.collected){
+        const dx = ship.x-c.x, dy=(ship.y-ship.h/2)-c.y;
+        if(Math.sqrt(dx*dx+dy*dy) < c.r+16){
+          c.collected = true;
+          coinsCollected += coinMultiplier;
+          combo = Math.min(combo+1, 9);
+          maxComboThisRun = Math.max(maxComboThisRun, combo);
+          comboTimer = comboTimerMax;
+          coinScore += 8*combo*coinMultiplier*(scoreMultiplierTimer > 0 ? 2 : 1);
+          sfx.combo(combo);
+          spawnBurst(c.x, c.y, '#ffd23f', 8);
+          if(combo !== lastTierCombo && (combo===4||combo===6||combo===8)){
+            const tierColor = comboTierColor(combo);
+            screenFlash(tierColor, 0.3);
+            pulseRings.push({ x:ship.x, y:ship.y-ship.h/2, r:6, alpha:1, color:tierColor });
+          }
+          lastTierCombo = combo;
+        }
+      }
+    }
+    // colisão nave x power-up
+    for(const p of powerups){
+      if(!p.collected){
+        const dx = ship.x-p.x, dy=(ship.y-ship.h/2)-p.y;
+        if(Math.sqrt(dx*dx+dy*dy) < p.r+16){
+          p.collected = true;
+          powerupsUsedThisRun++;
+          if(p.type==='shield') shieldCount = Math.min(shieldCount+1, 2);
+          else if(p.type==='magnet') magnetTimer = MAGNET_DUR;
+          else if(p.type==='slowmo') slowmoTimer = SLOWMO_DUR;
+          else if(p.type==='multiplier') scoreMultiplierTimer = MULTIPLIER_DUR;
+          sfx.powerup();
+          screenFlash(p.color, 0.3);
+          spawnBurst(p.x, p.y, p.color, 12);
+          pulseRings.push({ x:p.x, y:p.y, r:8, alpha:1, color:p.color });
+        }
+      }
+    }
+
+    // anéis pulsantes (combo/power-up)
+    for(const r of pulseRings){ r.r += dt*260; r.alpha -= dt*2; }
+    pulseRings = pulseRings.filter(r=>r.alpha>0);
+
+    if(shake > 0) shake = Math.max(0, shake - dt*3);
+
+    scoreLive.textContent = currentScore();
+    const musicTier = musicTierFor(elapsed);
+    musicTierDot.textContent = musicTier===1 ? '🟢' : musicTier===2 ? '🟡' : '🔴';
+    updateComboUI();
+    updateEffectsUI();
+
+    // modo níveis: verificar conclusão
+    if(mode === 'levels' && currentScore() >= LEVELS[currentLevel].target){
+      finishLevel();
+    }
+  }
+
+  function updateComboUI(){
+    if(combo > 1){
+      let label = 'combo x'+combo;
+      if(combo>=8) label = '🔥 INSANO x'+combo;
+      else if(combo>=6) label = 'INCRÍVEL x'+combo;
+      else if(combo>=4) label = 'muito bem! x'+combo;
+      else label = 'legal! x'+combo;
+      comboLive.textContent = label;
+      comboLive.classList.add('show');
+      comboBar.classList.add('show');
+      comboBarFill.style.transform = 'scaleX(' + Math.max(0, comboTimer/comboTimerMax) + ')';
+    } else {
+      comboLive.classList.remove('show');
+      comboBar.classList.remove('show');
+    }
+  }
+  function updateEffectsUI(){
+    shieldPill.classList.toggle('show', shieldCount>0);
+    shieldCountTxt.textContent = shieldCount;
+    magnetPill.classList.toggle('show', magnetTimer>0);
+    magnetBarFill.style.transform = 'scaleX(' + (magnetTimer/MAGNET_DUR) + ')';
+    slowmoPill.classList.toggle('show', slowmoTimer>0);
+    slowmoBarFill.style.transform = 'scaleX(' + (slowmoTimer/SLOWMO_DUR) + ')';
+    multiplierPill.classList.toggle('show', scoreMultiplierTimer>0);
+    multiplierBarFill.style.transform = 'scaleX(' + (scoreMultiplierTimer/MULTIPLIER_DUR) + ')';
+  }
+
+  function spawnShipFragments(){
+    const cx = ship.x, cy = ship.y-ship.h/2;
+    const skin = getSkin(player.equipped);
+    const color = skin.body === 'rainbow' ? '#eef1f8' : skin.body;
+    for(let i=0;i<10;i++){
+      fragments.push({
+        x:cx, y:cy, vx:(Math.random()-0.5)*320, vy:-Math.random()*260-40,
+        rot:Math.random()*6.28, vr:(Math.random()-0.5)*10,
+        size:4+Math.random()*5, color, life:0.7+Math.random()*0.4
+      });
+    }
+  }
+
+  function triggerCrash(){
+    if(deathPhase !== 'none') return;
+    stopMusic();
+    pauseBtn.style.display = 'none';
+    deathPhase = 'freeze';
+    deathTimer = REDUCE_MOTION ? 0.02 : 0.08;
+    shake = REDUCE_MOTION ? 0 : 1;
+    shockwave = { x:ship.x, y:ship.y-ship.h/2, r:4, alpha:1 };
+    spawnShipFragments();
+    spawnBurst(ship.x, ship.y-ship.h/2, '#ff3860', REDUCE_MOTION ? 10 : 26);
+    sfx.hit();
+    screenFlash('#ff3860', REDUCE_MOTION ? 0.25 : 0.55);
+  }
+
+  function handleDeathSequence(realDt){
+    let dt = realDt;
+    if(deathPhase === 'freeze'){
+      dt = 0;
+      deathTimer -= realDt;
+      if(deathTimer <= 0){ deathPhase = 'slowmo'; deathTimer = REDUCE_MOTION ? 0.05 : 0.45; }
+    } else if(deathPhase === 'slowmo'){
+      dt = realDt * (REDUCE_MOTION ? 1 : 0.25);
+      deathTimer -= realDt;
+      if(deathTimer <= 0){ deathPhase = 'done'; }
+    }
+    for(const p of particles){ p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=600*dt; p.life-=dt; }
+    particles = particles.filter(p=>p.life>0);
+    for(const f of fragments){ f.x+=f.vx*dt; f.y+=f.vy*dt; f.vy+=900*dt; f.rot+=f.vr*dt; f.life-=dt; }
+    fragments = fragments.filter(f=>f.life>0);
+    if(shockwave){ shockwave.r += realDt*420; shockwave.alpha -= realDt*2.1; if(shockwave.alpha<=0) shockwave=null; }
+    if(shake>0) shake = Math.max(0, shake-realDt*2.2);
+    if(flashAlpha>0) flashAlpha = Math.max(0, flashAlpha-realDt*2.2);
+    draw();
+    if(deathPhase === 'done'){ finalizeCrash(); return; }
+    animId = requestAnimationFrame(loop);
+  }
+
+  function roundRect(ctx,x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    ctx.save();
+    if(shake>0 && !REDUCE_MOTION){
+      ctx.translate((Math.random()-0.5)*shake*10, (Math.random()-0.5)*shake*10);
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    for(const s of starsBg){ ctx.globalAlpha = nightMode ? 0.25 : 0.5; ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,7); ctx.fill(); }
+    if(nightMode){ ctx.fillStyle='rgba(0,0,10,0.35)'; ctx.fillRect(0,0,W,H); }
+    ctx.globalAlpha = 1;
+
+    const grad = ctx.createLinearGradient(0, groundY, 0, groundY+40);
+    grad.addColorStop(0, 'rgba(108,60,233,0.35)'); grad.addColorStop(1, 'rgba(108,60,233,0)');
+    ctx.fillStyle = grad; ctx.fillRect(0, groundY, W, 40);
+    ctx.strokeStyle = 'rgba(108,60,233,0.55)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, groundY); ctx.lineTo(W, groundY); ctx.stroke();
+
+    for(const o of obstacles){
+      let color;
+      if(o.type === 'floater') color = '#ff9d3d';
+      else if(o.type === 'gateTop' || o.type === 'gateBottom') color = '#a06cff';
+      else if(o.type === 'swooper') color = '#ff0044';
+      else color = o.tall ? '#ff3860' : '#ff6a3d';
+      ctx.fillStyle = color; ctx.shadowColor = color;
+      ctx.shadowBlur = o.type === 'swooper' ? (14 + Math.sin(performance.now()/60)*8) : 14;
+      if(o.type === 'floater'){ ctx.beginPath(); ctx.arc(o.x+o.w/2,o.y+o.h/2,o.w/2,0,7); ctx.fill(); }
+      else { roundRect(ctx,o.x,o.y,o.w,o.h,6); ctx.fill(); }
+      ctx.shadowBlur = 0;
+    }
+
+    for(const c of coins){
+      if(c.collected) continue;
+      ctx.beginPath(); ctx.fillStyle = '#ffd23f'; ctx.shadowColor='#ffd23f'; ctx.shadowBlur=12;
+      ctx.arc(c.x,c.y,c.r,0,7); ctx.fill(); ctx.shadowBlur=0;
+    }
+
+    for(const p of powerups){
+      if(p.collected) continue;
+      ctx.beginPath(); ctx.fillStyle=p.color; ctx.shadowColor=p.color; ctx.shadowBlur=16;
+      ctx.arc(p.x,p.y,p.r,0,7); ctx.fill();
+      ctx.shadowBlur=0; ctx.font='13px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      const icon = p.type==='shield' ? '🛡' : p.type==='magnet' ? '🧲' : p.type==='slowmo' ? '⏱' : '✨';
+      ctx.fillText(icon, p.x, p.y+1);
+    }
+
+    for(const p of particles){
+      ctx.globalAlpha = Math.max(0, p.life/p.maxLife); ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x,p.y,3,0,7); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    for(const f of fragments){
+      ctx.save(); ctx.translate(f.x,f.y); ctx.rotate(f.rot);
+      ctx.globalAlpha = Math.max(0, f.life);
+      ctx.fillStyle = f.color;
+      ctx.beginPath(); ctx.moveTo(f.size,0); ctx.lineTo(-f.size,-f.size*0.6); ctx.lineTo(-f.size,f.size*0.6); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+
+    if(shockwave){
+      ctx.strokeStyle = 'rgba(255,56,96,'+Math.max(0,shockwave.alpha)+')';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(shockwave.x, shockwave.y, shockwave.r, 0, 7); ctx.stroke();
+    }
+    for(const r of pulseRings){
+      ctx.globalAlpha = Math.max(0, r.alpha);
+      ctx.strokeStyle = r.color; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, 7); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    if(deathPhase === 'none'){
+      const skin = getSkin(player.equipped);
+      const speedDiv = skin.rainbowSpeed || 8;
+      const hueT = (performance.now()/speedDiv) % 360;
+      const bodyColor = skin.body==='rainbow' ? `hsl(${hueT},85%,75%)` : skin.body;
+      const accentColor = skin.accent==='rainbow' ? `hsl(${(hueT+120)%360},85%,60%)` : skin.accent;
+      const flameColor = skin.flame==='rainbow' ? `hsl(${(hueT+240)%360},85%,60%)` : skin.flame;
+
+      ctx.save();
+      ctx.translate(ship.x, ship.y-ship.h/2);
+      const tilt = Math.max(-0.4, Math.min(0.4, ship.vy/1800));
+      ctx.rotate(tilt);
+      ctx.fillStyle = flameColor; ctx.shadowColor = flameColor; ctx.shadowBlur = 16;
+      ctx.beginPath();
+      ctx.moveTo(-ship.w/2-4, 4); ctx.lineTo(-ship.w/2-16-Math.random()*6, 0); ctx.lineTo(-ship.w/2-4, -4);
+      ctx.closePath(); ctx.fill();
+      ctx.shadowColor = accentColor; ctx.shadowBlur = 14;
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.moveTo(ship.w/2, 0); ctx.lineTo(-ship.w/2, -ship.h/2); ctx.lineTo(-ship.w/2+8, 0); ctx.lineTo(-ship.w/2, ship.h/2);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = accentColor;
+      ctx.beginPath(); ctx.arc(2,0,4,0,7); ctx.fill();
+      ctx.shadowBlur = 0;
+      if(shieldCount>0){
+        ctx.strokeStyle = 'rgba(79,214,255,0.7)'; ctx.lineWidth=2;
+        ctx.beginPath(); ctx.arc(0,0,ship.w*0.85,0,7); ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    if(flashAlpha > 0){
+      ctx.fillStyle = flashColor; ctx.globalAlpha = flashAlpha;
+      ctx.fillRect(0,0,W,H); ctx.globalAlpha = 1;
+    }
+  }
+
+  function loop(t){
+    if(!running) return;
+    if(deathPhase !== 'none'){
+      const dt = Math.min(0.033, (t-lastTime)/1000 || 0);
+      lastTime = t;
+      handleDeathSequence(dt);
+      return;
+    }
+    if(paused){ lastTime = t; animId = requestAnimationFrame(loop); return; }
+    const dt = Math.min(0.033, (t-lastTime)/1000 || 0);
+    lastTime = t;
+    update(dt);
+    draw();
+    animId = requestAnimationFrame(loop);
+  }
+
+  async function submitAndShowBoard(score, prefix, label, elapsedSeconds){
+    await submitScore(score, prefix, elapsedSeconds);
+    const { rank } = await getMyRank(prefix);
+    boardTitle.textContent = label || '🏆 Ranking mundial';
+    renderBoard(null, player.id, prefix);
+    boardBody.classList.add('open');
+    boardToggle.classList.add('open');
+    return rank;
+  }
+
+  async function finalizeCrash(){
+    running = false; deathPhase = 'none';
+    cancelAnimationFrame(animId);
+
+    const score = currentScore();
+    const isNewBest = mode === 'daily' ? (score > (player.bestDaily||0)) : (score > player.best);
+    if(isNewBest){ if(mode === 'daily') player.bestDaily = score; else player.best = score; }
+    const earned = coinsCollected;
+    player.credits = (player.credits||0) + earned;
+
+    const missionResult = evaluateMissionsAfterRun();
+    player.credits += missionResult.totalReward;
+
+    await savePlayer();
+    bestChip.textContent = player.best;
+    creditsChip.textContent = player.credits;
+    earnedCreditsEl.textContent = earned>0 ? ('+'+earned+' moedas coletadas') : '';
+    missionToast.textContent = missionResult.totalReward>0 ? ('Missão concluída: +'+missionResult.totalReward+' moedas!') : '';
+
+    const dailyPrefix = DAILY_PREFIX + todayKey() + ':';
+    const rank = mode === 'levels'
+      ? await submitAndShowBoard(score, LB_PREFIX, '🏆 Ranking mundial', elapsed)
+      : mode === 'daily'
+        ? await submitAndShowBoard(score, dailyPrefix, '🔥 Ranking de hoje', elapsed)
+        : await submitAndShowBoard(score, LB_PREFIX, '🏆 Ranking mundial', elapsed);
+
+    if(mode === 'endless'){
+      finalScore.textContent = score;
+      resultSub.textContent = 'pontos nessa corrida';
+      rankTag.textContent = rank ? ('#'+rank+' no mundo'+(isNewBest?' • novo recorde! 🔥':'')) : (isNewBest?'novo recorde! 🔥':'');
+      shareBtn.dataset.text = `Fiz ${score} pontos no Meteor Mayhem e fiquei em #${rank||'?'} no ranking mundial! 🚀`;
+      ariaLive.textContent = 'Fim de jogo. Pontuação: '+score+(isNewBest?'. Novo recorde!':'');
+    } else if(mode === 'daily'){
+      finalScore.textContent = score;
+      resultSub.textContent = 'pontos no desafio de hoje';
+      rankTag.textContent = rank ? ('#'+rank+' hoje'+(isNewBest?' • novo recorde! 🔥':'')) : (isNewBest?'novo recorde! 🔥':'');
+      shareBtn.dataset.text = `Fiz ${score} pontos no Desafio Diário do Meteor Mayhem e fiquei em #${rank||'?'} hoje! 🔥`;
+      ariaLive.textContent = 'Fim do desafio diário. Pontuação: '+score+(isNewBest?'. Novo recorde!':'');
+    } else {
+      finalScore.textContent = score;
+      resultSub.textContent = 'pontos — alvo era ' + LEVELS[currentLevel].target;
+      rankTag.textContent = rank ? ('#'+rank+' no mundo'+(isNewBest?' • novo recorde! 🔥':'')) : ('Nível ' + (currentLevel+1) + ' não concluído');
+      shareBtn.dataset.text = `Cheguei no nível ${currentLevel+1} do Meteor Mayhem com ${score} pontos! 🚀`;
+      ariaLive.textContent = 'Fim de jogo no nível '+(currentLevel+1)+'. Pontuação: '+score;
+    }
+    deathOverlay.classList.remove('hidden');
+  }
+
+  async function finishLevel(){
+    if(deathPhase !== 'none' || !running) return;
+    running = false;
+    stopMusic();
+    pauseBtn.style.display = 'none';
+    cancelAnimationFrame(animId);
+    const score = currentScore();
+    const isNewBest = score > player.best;
+    if(isNewBest) player.best = score;
+    const lvl = LEVELS[currentLevel];
+    const earnedCoins = coinsCollected;
+    const levelBonus = lvl.reward.credits || 0;
+    player.credits = (player.credits||0) + earnedCoins + levelBonus;
+    if(currentLevel+1 > player.levelProgress) player.levelProgress = currentLevel+1;
+    let skinMsg = '';
+    if(lvl.reward.skin && !player.skins.includes(lvl.reward.skin)){
+      player.skins.push(lvl.reward.skin);
+      skinMsg = 'Nave nova desbloqueada: ' + getSkin(lvl.reward.skin).name + '! 🎉';
+    }
+    const missionResult = evaluateMissionsAfterRun();
+    player.credits += missionResult.totalReward;
+    await savePlayer();
+    bestChip.textContent = player.best;
+    creditsChip.textContent = player.credits;
+    sfx.levelUp();
+
+    const rank = await submitAndShowBoard(score, LB_PREFIX, '🏆 Ranking mundial', elapsed);
+
+    levelCompleteTitle.textContent = 'Nível ' + (currentLevel+1) + ' concluído!';
+    levelCompleteScore.textContent = score;
+    levelCompleteCredits.textContent = '+' + (earnedCoins+levelBonus) + ' moedas' + (missionResult.totalReward>0 ? (' (+' + missionResult.totalReward + ' de missão)') : '') + (rank ? (' • #'+rank+' no mundo') : '');
+    levelCompleteSkin.textContent = skinMsg;
+    nextLevelBtn.style.display = (currentLevel+1 < LEVELS.length) ? 'inline-block' : 'none';
+    ariaLive.textContent = 'Nível '+(currentLevel+1)+' concluído com '+score+' pontos.';
+    levelCompleteOverlay.classList.remove('hidden');
+  }
+
+  function startGame(){
+    deathOverlay.classList.add('hidden');
+    levelCompleteOverlay.classList.add('hidden');
+    resetGame();
+    running = true;
+    lastTime = performance.now();
+    if(mode === 'levels'){
+      const lvl = LEVELS[currentLevel];
+      hint.textContent = 'Nível ' + (currentLevel+1) + ': ' + lvl.modLabel + ' — alvo ' + lvl.target + ' pontos';
+    } else {
+      hint.textContent = 'toque ou aperte ESPAÇO para pular';
+    }
+    hint.style.opacity = '1';
+    setTimeout(()=>{ hint.style.opacity='0'; }, 2800);
+    animId = requestAnimationFrame(loop);
+    pauseBtn.style.display = 'flex';
+    pauseBtn.textContent = '⏸';
+    startMusic();
+  }
+
+  // ---------- Input ----------
+  function inputJump(e){
+    ensureAudio();
+    if(!running || paused || deathPhase!=='none') return;
+    if(e) e.preventDefault();
+    doJump();
+  }
+  stage.addEventListener('pointerdown', inputJump);
+  window.addEventListener('keydown', (e)=>{
+    if(e.code !== 'Space' && e.code !== 'ArrowUp') return;
+    const active = document.activeElement; const tag = active && active.tagName;
+    if(tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if(running && !paused && deathPhase==='none'){ e.preventDefault(); ensureAudio(); doJump(); return; }
+    if(tag === 'BUTTON') return;
+    e.preventDefault();
+  });
+
+  // ---------- Menu / modos ----------
+  modeEndlessTab.addEventListener('click', ()=>{
+    sfx.click(); mode='endless';
+    modeEndlessTab.classList.add('active');
+    modeLevelsTab.classList.remove('active');
+    modeDailyTab.classList.remove('active');
+  });
+  modeLevelsTab.addEventListener('click', ()=>{ sfx.click(); renderLevelGrid(); levelPickOverlay.classList.remove('hidden'); });
+  modeDailyTab.addEventListener('click', ()=>{
+    sfx.click(); mode='daily';
+    modeEndlessTab.classList.remove('active');
+    modeLevelsTab.classList.remove('active');
+    modeDailyTab.classList.add('active');
+  });
+  closeLevelPickBtn.addEventListener('click', ()=>{ sfx.click(); levelPickOverlay.classList.add('hidden'); });
+  function renderLevelGrid(){
+    levelGrid.innerHTML = '';
+    LEVELS.forEach((lvl, idx)=>{
+      const unlocked = idx <= player.levelProgress;
+      const done = idx < player.levelProgress;
+      const cell = document.createElement('button');
+      cell.className = 'level-cell' + (!unlocked?' locked':'') + (done?' done':'');
+      cell.textContent = idx+1;
+      cell.disabled = !unlocked;
+      cell.setAttribute('aria-label', 'Nível ' + (idx+1) + (done ? ' concluído' : (unlocked ? ' disponível' : ' bloqueado')));
+      cell.addEventListener('click', ()=>{
+        sfx.click();
+        currentLevel = idx; mode = 'levels';
+        modeEndlessTab.classList.remove('active'); modeLevelsTab.classList.add('active');
+        modeDailyTab.classList.remove('active');
+        modeLevelsTab.textContent = '🏁 Nível ' + (idx+1);
+        levelPickOverlay.classList.add('hidden');
+      });
+      levelGrid.appendChild(cell);
+    });
+  }
+  nextLevelBtn.addEventListener('click', ()=>{ sfx.click(); currentLevel++; startGame(); });
+  levelCompleteMenuBtn.addEventListener('click', ()=>{ sfx.click(); levelCompleteOverlay.classList.add('hidden'); nameOverlay.classList.remove('hidden'); });
+  menuFromDeathBtn.addEventListener('click', ()=>{ sfx.click(); deathOverlay.classList.add('hidden'); nameOverlay.classList.remove('hidden'); });
+  retryBtn.addEventListener('click', ()=>{ sfx.click(); startGame(); });
+
+  shareBtn.addEventListener('click', async ()=>{
+    if(shareBtn.disabled) return;
+    const text = shareBtn.dataset.text || '';
+    shareBtn.disabled = true;
+    try{
+      if(navigator.share){
+        try{ await navigator.share({ title:'Meteor Mayhem', text }); return; }
+        catch(e){ /* usuário cancelou o compartilhamento nativo, cai pro clipboard */ }
+      }
+      try{ await navigator.clipboard.writeText(text); shareBtn.textContent='Copiado! ✅'; setTimeout(()=>{ shareBtn.textContent = navigator.share ? 'Compartilhar resultado' : 'Copiar resultado'; },1600); }
+      catch(e){ shareBtn.textContent = text; }
+    } finally {
+      shareBtn.disabled = false;
+    }
+  });
+
+  startBtn.addEventListener('click', async ()=>{
+    ensureAudio();
+    let n = nameInput.value.trim();
+    if(!n) n = 'Piloto ' + Math.floor(Math.random()*900+100);
+    n = n.slice(0,14);
+    if(!player.id) player.id = uuid();
+    nameError.textContent = '';
+    startBtn.disabled = true; const oldTxt = startBtn.textContent; startBtn.textContent = 'Verificando...';
+    const claim = await claimName(n, player.id);
+    startBtn.disabled = false; startBtn.textContent = oldTxt;
+    if(!claim.ok){ nameError.textContent = 'Esse nome já foi usado. Escolha outro!'; return; }
+    player.name = n;
+    await savePlayer();
+    nameOverlay.classList.add('hidden');
+    resizeCanvas();
+    startGame();
+  });
+  nameInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter') startBtn.click(); });
+
+  // ---------- Loja ----------
+  let overlayToRestore = null;
+  function renderShop(){
+    shopCredits.textContent = player.credits;
+    creditsChip.textContent = player.credits;
+    skinGrid.innerHTML = '';
+    SKINS.forEach(skin=>{
+      const owned = player.skins.includes(skin.id) || skin.price === 0;
+      const equipped = player.equipped === skin.id;
+      const isLevelSkin = skin.source === 'level';
+      const previewBg = skin.body==='rainbow' ? 'conic-gradient(from 0deg, #ff3860, #ffd23f, #7dff4d, #2de2e6, #a06cff, #ff3860)' : skin.body;
+      const card = document.createElement('div');
+      card.className = 'skin-card' + (equipped?' equipped':'') + (isLevelSkin && !owned ? ' locked-level' : '');
+      const preview = document.createElement('div'); preview.className='skin-preview'; preview.style.background=previewBg;
+      const name = document.createElement('div'); name.className='skin-name'; name.textContent=skin.name;
+      const price = document.createElement('div'); price.className='skin-price';
+      price.textContent = isLevelSkin ? (owned?'desbloqueada':('nível '+skin.requiredLevel)) : (skin.price===0?'grátis':(skin.price+' moedas'));
+      const btn = document.createElement('button');
+      btn.className = 'skin-btn' + (equipped?' equipped-btn':(!owned?' locked':''));
+      btn.textContent = equipped ? 'Equipada' : (owned ? 'Equipar' : (isLevelSkin ? 'Bloqueada' : 'Comprar'));
+      btn.disabled = isLevelSkin && !owned;
+      btn.addEventListener('click', async ()=>{
+        if(equipped || (isLevelSkin && !owned)) return;
+        sfx.click();
+        if(owned){ player.equipped = skin.id; await savePlayer(); renderShop(); }
+        else if(player.credits >= skin.price){
+          player.credits -= skin.price; player.skins.push(skin.id); player.equipped = skin.id;
+          await savePlayer(); creditsChip.textContent = player.credits; renderShop();
+        }
+      });
+      card.appendChild(preview); card.appendChild(name); card.appendChild(price); card.appendChild(btn);
+      skinGrid.appendChild(card);
+    });
+  }
+  function setPaused(p){
+    paused = p;
+    pauseBtn.textContent = paused ? '▶' : '⏸';
+    if(paused){ stopMusic(); } else { lastTime = performance.now(); startMusic(); }
+  }
+  pauseBtn.addEventListener('click', ()=>{
+    if(!running || deathPhase !== 'none') return;
+    sfx.click();
+    setPaused(!paused);
+  });
+
+  function openShop(){
+    sfx.click();
+    if(running) setPaused(true);
+    if(!deathOverlay.classList.contains('hidden')){ deathOverlay.classList.add('hidden'); overlayToRestore = deathOverlay; }
+    renderShop();
+    shopOverlay.classList.remove('hidden');
+  }
+  function closeShop(){
+    sfx.click();
+    shopOverlay.classList.add('hidden');
+    if(overlayToRestore){ overlayToRestore.classList.remove('hidden'); overlayToRestore = null; }
+    if(paused){ setPaused(false); }
+  }
+  shopToggleBtn.addEventListener('click', openShop);
+  shopFromDeathBtn.addEventListener('click', openShop);
+  closeShopBtn.addEventListener('click', closeShop);
+
+  // ---------- Boot ----------
+  (async function boot(){
+    resizeCanvas();
+    initStars();
+    await loadPlayer();
+    bestChip.textContent = player.best || 0;
+    creditsChip.textContent = player.credits || 0;
+    updateMuteBtn();
+    if(navigator.share) shareBtn.textContent = 'Compartilhar resultado';
+    if(player.name){ nameInput.value = player.name; }
+    renderBoard();
+    // corrige recordes antigos que nunca chegaram a ser enviados ao ranking mundial
+    if(player.id && player.name && player.best > 0){
+      submitScore(player.best, LB_PREFIX).catch(()=>{});
+    }
+    setTimeout(()=>{ nameInput.focus(); }, 150);
+  })();
+
+})();

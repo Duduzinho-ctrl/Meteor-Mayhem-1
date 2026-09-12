@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Meteor Mayhem</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Rubik+Mono+One&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+<div class="stars"></div>
+<div class="app">
+
+  <div class="topbar">
+    <div class="brand">METEOR<span>MAYHEM</span></div>
+    <div class="topbar-right">
+      <button class="icon-btn" id="muteBtn" aria-label="Ligar ou desligar o som" title="Som">🔊</button>
+      <button class="chip-btn" id="missionsToggleBtn" aria-label="Abrir missões">🎯</button>
+      <button class="chip-btn" id="shopToggleBtn" aria-label="Abrir loja">🛒 <b id="creditsChip">0</b></button>
+      <button class="chip-btn profile-chip" id="profileBtn" aria-label="Abrir perfil">👤 Perfil</button>
+      <div class="best-chip">recorde <b id="bestChip">0</b></div>
+    </div>
+  </div>
+
+  <div class="stage" id="stage">
+    <canvas id="game" role="img" aria-label="Área de jogo do Meteor Mayhem"></canvas>
+    <div class="hud">
+      <div>
+        <div class="score-big"><span id="scoreLive">0</span> <span id="musicTierDot" style="font-size:14px; vertical-align:middle;">🟢</span></div>
+        <div class="combo" id="comboLive">combo x1</div>
+        <div class="combo-bar" id="comboBar"><div class="combo-bar-fill" id="comboBarFill"></div></div>
+      </div>
+      <div class="effects-hud">
+    <button class="icon-btn" id="pauseBtn" aria-label="Pausar" style="display:none; margin-bottom:4px; pointer-events:auto;">⏸</button>
+        <div class="effect-pill" id="shieldPill">🛡️ <span id="shieldCountTxt">0</span></div>
+        <div class="effect-pill" id="magnetPill">🧲 <div class="effect-bar"><i id="magnetBarFill" style="background:var(--magnet)"></i></div></div>
+        <div class="effect-pill" id="slowmoPill">⏱ <div class="effect-bar"><i id="slowmoBarFill" style="background:var(--slowmo)"></i></div></div>
+        <div class="effect-pill" id="multiplierPill">✨ <div class="effect-bar"><i id="multiplierBarFill" style="background:var(--gold)"></i></div></div>
+      </div>
+    </div>
+    <div class="hint" id="hint">toque ou aperte ESPAÇO para pular</div>
+    <div class="visually-hidden" id="ariaLive" aria-live="polite"></div>
+
+    <div class="overlay" id="nameOverlay">
+      <div class="panel">
+        <h1>METEOR MAYHEM</h1>
+        <p>Pilote sua nave por uma chuva de meteoros sem fim. Pule pra desviar (toque de novo no ar pra pular mais alto), pegue cristais e power-ups, e tente entrar pro top do mundo.</p>
+        <div class="mode-tabs">
+          <button class="mode-tab active" id="modeEndlessTab" data-mode="endless">♾️ Sem fim</button>
+          <button class="mode-tab" id="modeLevelsTab" data-mode="levels">🏁 Níveis</button>
+          <button class="mode-tab" id="modeDailyTab" data-mode="daily">🔥 Desafio diário</button>
+        </div>
+        <input id="nameInput" maxlength="14" placeholder="Digite seu nome de piloto" autocomplete="off">
+        <div class="name-error" id="nameError"></div>
+        <button class="btn" id="startBtn">Começar a voar</button>
+      </div>
+    </div>
+
+    <div class="overlay hidden" id="levelPickOverlay">
+      <div class="panel levels-panel">
+        <h1>Modo Níveis</h1>
+        <p>Complete cada nível pra desbloquear o próximo. Alguns níveis dão naves exclusivas de recompensa.</p>
+        <div class="level-grid" id="levelGrid"></div>
+        <button class="btn ghost" id="closeLevelPickBtn">Voltar</button>
+      </div>
+    </div>
+
+    <div class="overlay hidden" id="levelCompleteOverlay">
+      <div class="panel">
+        <h1 id="levelCompleteTitle">Nível concluído!</h1>
+        <div class="result-score" id="levelCompleteScore">0</div>
+        <div class="result-sub">pontos</div>
+        <div class="earned-credits" id="levelCompleteCredits"></div>
+        <div class="earned-credits" id="levelCompleteSkin"></div>
+        <button class="btn" id="nextLevelBtn">Próximo nível</button>
+        <button class="btn ghost" id="levelCompleteMenuBtn">Menu</button>
+      </div>
+    </div>
+
+    <div class="overlay hidden" id="deathOverlay">
+      <div class="panel">
+        <div class="rank-tag" id="rankTag">calculando...</div>
+        <div class="result-score" id="finalScore">0</div>
+        <div class="result-sub" id="resultSub">pontos nessa corrida</div>
+        <div class="earned-credits" id="earnedCredits"></div>
+        <div class="mission-toast" id="missionToast"></div>
+        <button class="btn" id="retryBtn">Voar de novo</button>
+        <button class="btn ghost" id="shareBtn">Copiar resultado</button>
+        <br>
+        <button class="btn ghost" id="shopFromDeathBtn" style="margin-top:8px;">🛒 Loja</button>
+        <button class="btn ghost" id="menuFromDeathBtn" style="margin-top:8px;">Menu</button>
+      </div>
+    </div>
+
+    <div class="overlay hidden" id="shopOverlay">
+      <div class="panel shop-panel">
+        <h1>Loja da nave</h1>
+        <p>Cada moeda coletada durante o voo vira dinheiro pra destravar naves novas. Algumas são recompensa exclusiva do Modo Níveis.</p>
+        <div class="wallet">Moedas disponíveis: <b id="shopCredits">0</b></div>
+        <div class="skin-grid" id="skinGrid"></div>
+        <button class="btn ghost" id="closeShopBtn">Fechar</button>
+      </div>
+    </div>
+
+    <div class="overlay hidden" id="profileOverlay">
+      <div class="panel profile-panel">
+        <div class="profile-head">
+          <div class="profile-avatar">🚀</div>
+          <div>
+            <h1 id="profileName">Piloto</h1>
+            <div class="profile-sub" id="profileRankLine">Calculando posição...</div>
+          </div>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-card"><b id="statBest">0</b><span>Melhor</span></div>
+          <div class="stat-card"><b id="statRuns">0</b><span>Partidas</span></div>
+          <div class="stat-card"><b id="statCoins">0</b><span>Moedas</span></div>
+          <div class="stat-card"><b id="statCombo">x1</b><span>Melhor combo</span></div>
+          <div class="stat-card"><b id="statStreak">0</b><span>Streak diário</span></div>
+          <div class="stat-card"><b id="statSkins">1</b><span>Naves</span></div>
+        </div>
+        <div class="profile-next" id="profileNext">Jogue uma partida para entrar no ranking.</div>
+        <button class="btn ghost" id="closeProfileBtn">Fechar</button>
+      </div>
+    </div>
+
+    <div class="overlay hidden" id="missionsOverlay">
+      <div class="panel missions-panel">
+        <h1>Missões</h1>
+        <p>Cumpra as missões numa única corrida pra ganhar moedas extras.</p>
+        <div id="missionsList"></div>
+        <button class="btn ghost" id="closeMissionsBtn">Fechar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="leaderboard">
+    <button class="board-toggle" id="boardToggle">
+      <span id="boardTitle">🏆 Ranking mundial</span>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+    <div class="board-body" id="boardBody">
+      <div class="board-loading">carregando ranking...</div>
+    </div>
+  </div>
+
+  <div class="footer-note">seu progresso, moedas e naves ficam salvos automaticamente</div>
+</div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
